@@ -1,0 +1,1529 @@
+// ==========================================
+// 0. محرك تخزين IndexedDB (يدعم جميع أنواع الملفات دون تحويل)
+// ==========================================
+const DB_NAME = 'SchoolAppDatabase_v3';
+const DB_VERSION = 1;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('annual_files')) db.createObjectStore('annual_files', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('exams')) db.createObjectStore('exams', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('memos')) db.createObjectStore('memos', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('admin_docs')) db.createObjectStore('admin_docs', { keyPath: 'id' });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function dbSave(storeName, item) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    const req = store.put(item);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbGetAll(storeName) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readonly');
+    const store = tx.objectStore(storeName);
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbGet(storeName, id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readonly');
+    const store = tx.objectStore(storeName);
+    const req = store.get(id);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbDelete(storeName, id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    const req = store.delete(id);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function dataURLtoBlob(dataurl) {
+  try {
+    let arr = dataurl.split(','), mime = arr[0].match(/:(.*?);/)[1];
+    let bstr = atob(arr[1]), n = bstr.length, u8arr = new Uint8Array(n);
+    while(n--){ u8arr[n] = bstr.charCodeAt(n); }
+    return new Blob([u8arr], {type: mime});
+  } catch(e) {
+    return null;
+  }
+}
+
+// ==========================================
+// 1. التنقل بين الواجهات الرئيسية
+// ==========================================
+const homeView = document.getElementById('homeView');
+const studentsView = document.getElementById('studentsView');
+const annualPlanView = document.getElementById('annualPlanView');
+const dailyLogView = document.getElementById('dailyLogView');
+const examsArchiveView = document.getElementById('examsArchiveView');
+const documentsIndexView = document.getElementById('documentsIndexView');
+const memosArchiveView = document.getElementById('memosArchiveView');
+
+const studentsCard = document.getElementById('studentsCard');
+const monitoringCard = document.getElementById('monitoringCard');
+const annualPlanCard = document.getElementById('annualPlanCard');
+const dailyLogCard = document.getElementById('dailyLogCard');
+const examsArchiveCard = document.getElementById('examsArchiveCard');
+const documentsIndexCard = document.getElementById('documentsIndexCard');
+const memosCard = document.getElementById('memosCard');
+
+if (studentsCard) studentsCard.addEventListener('click', () => { homeView.style.display = 'none'; studentsView.style.display = 'block'; });
+if (monitoringCard) monitoringCard.addEventListener('click', () => { homeView.style.display = 'none'; studentsView.style.display = 'block'; });
+if (annualPlanCard) annualPlanCard.addEventListener('click', () => { homeView.style.display = 'none'; annualPlanView.style.display = 'block'; });
+
+if (dailyLogCard) {
+  dailyLogCard.addEventListener('click', () => {
+    homeView.style.display = 'none';
+    dailyLogView.style.display = 'block';
+    initDailyLogView();
+  });
+}
+
+if (examsArchiveCard) {
+  examsArchiveCard.addEventListener('click', () => {
+    homeView.style.display = 'none';
+    examsArchiveView.style.display = 'block';
+    renderExamsList();
+  });
+}
+
+if (documentsIndexCard) {
+  documentsIndexCard.addEventListener('click', () => {
+    homeView.style.display = 'none';
+    documentsIndexView.style.display = 'block';
+    renderAdminDocsList();
+  });
+}
+
+if (memosCard) {
+  memosCard.addEventListener('click', () => {
+    homeView.style.display = 'none';
+    memosArchiveView.style.display = 'block';
+    renderMemosList();
+  });
+}
+
+document.querySelectorAll('.back-to-home').forEach(btn => {
+  btn.addEventListener('click', () => {
+    studentsView.style.display = 'none';
+    annualPlanView.style.display = 'none';
+    dailyLogView.style.display = 'none';
+    examsArchiveView.style.display = 'none';
+    documentsIndexView.style.display = 'none';
+    memosArchiveView.style.display = 'none';
+    homeView.style.display = 'block';
+    if (globalClassesData.length === 0) resetToUpload();
+  });
+});
+
+// ==========================================
+// 2. إدارة ملفات التوزيع السنوي
+// ==========================================
+const targetLevelSelect = document.getElementById('targetLevelSelect');
+const customLevelInput = document.getElementById('customLevelInput');
+const confirmLevelBtn = document.getElementById('confirmLevelBtn');
+const levelSelectionCard = document.getElementById('levelSelectionCard');
+const uploadAndManageSection = document.getElementById('uploadAndManageSection');
+const activeLevelIndicator = document.getElementById('activeLevelIndicator');
+const changeLevelBtn = document.getElementById('changeLevelBtn');
+const annualPlanFileInput = document.getElementById('annualPlanFileInput');
+const savedFilesContainer = document.getElementById('savedFilesContainer');
+
+let currentSelectedLevel = "";
+
+if (targetLevelSelect) {
+  targetLevelSelect.addEventListener('change', (e) => {
+    if (e.target.value === 'خيار آخر (أخرى)') {
+      customLevelInput.style.display = 'block';
+    } else {
+      customLevelInput.style.display = 'none';
+      customLevelInput.value = '';
+    }
+  });
+}
+
+if (confirmLevelBtn) {
+  confirmLevelBtn.addEventListener('click', () => {
+    let level = targetLevelSelect.value;
+    if (level === 'خيار آخر (أخرى)') level = customLevelInput.value.trim();
+    if (!level) { alert('الرجاء اختيار أو كتابة اسم المستوى الدراسي أولاً.'); return; }
+
+    currentSelectedLevel = level;
+    activeLevelIndicator.textContent = `المستوى الدراسي الحالي: ${currentSelectedLevel}`;
+    levelSelectionCard.style.display = 'none';
+    uploadAndManageSection.style.display = 'block';
+    renderFilesList();
+  });
+}
+
+if (changeLevelBtn) {
+  changeLevelBtn.addEventListener('click', () => {
+    uploadAndManageSection.style.display = 'none';
+    levelSelectionCard.style.display = 'block';
+    currentSelectedLevel = "";
+  });
+}
+
+if (annualPlanFileInput) {
+  annualPlanFileInput.addEventListener('change', async function(e) {
+    const file = e.target.files[0];
+    if (!file || !currentSelectedLevel) return;
+
+    const fileItem = {
+      id: Date.now(),
+      level: currentSelectedLevel,
+      name: file.name,
+      size: (file.size / 1024).toFixed(1) + ' KB',
+      blob: file,
+      date: new Date().toLocaleDateString('ar-EG')
+    };
+    await dbSave('annual_files', fileItem);
+    renderFilesList();
+    annualPlanFileInput.value = '';
+    alert(`تم رفع ملف التوزيع (${file.name}) بنجاح.`);
+  });
+}
+
+async function renderFilesList() {
+  if (!savedFilesContainer || !currentSelectedLevel) return;
+  const allFiles = await dbGetAll('annual_files');
+  const files = allFiles.filter(f => f.level === currentSelectedLevel);
+
+  if (files.length === 0) {
+    savedFilesContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: #718096;">لا توجد ملفات مرفوعة لهذا المستوى بعد.</div>`;
+    return;
+  }
+  savedFilesContainer.innerHTML = files.map((file, index) => `
+    <div style="display: flex; justify-content: space-between; align-items: center; background: #f8fafc; padding: 12px 15px; border-radius: 8px; border: 1px solid #e2e8f0; flex-wrap: wrap; gap: 10px;">
+      <div><span style="font-weight: bold; color: #1b4d3e;">${index + 1}. ${file.name}</span> <span style="font-size: 0.8rem; color: #718096;">(${file.size})</span></div>
+      <div style="display: flex; gap: 8px;">
+        <button class="reset-btn" style="background-color: #2b6cb0; color: white; padding: 5px 12px; font-size: 0.85rem;" onclick="readFileItem(${file.id})">📖 قراءة</button>
+        <button class="reset-btn" style="background-color: #1b4d3e; color: white; padding: 5px 12px; font-size: 0.85rem;" onclick="downloadFileItem(${file.id})">📥 تحميل</button>
+        <button class="reset-btn" style="background-color: #fed7d7; color: #c53030; padding: 5px 12px; font-size: 0.85rem;" onclick="deleteFileItem(${file.id})">🗑️ حذف</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+window.readFileItem = async function(fileId) {
+  const file = await dbGet('annual_files', fileId);
+  if (!file) return;
+  const blob = file.blob || dataURLtoBlob(file.data);
+  if(!blob) { alert('خطأ في قراءة الملف.'); return; }
+  const url = URL.createObjectURL(blob);
+  window.open(url, '_blank');
+};
+
+window.downloadFileItem = async function(fileId) {
+  const file = await dbGet('annual_files', fileId);
+  if (!file) return;
+  const blob = file.blob || dataURLtoBlob(file.data);
+  if(!blob) { alert('خطأ في تنزيل الملف.'); return; }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = file.name;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+window.deleteFileItem = async function(fileId) {
+  if (confirm('هل أنت متأكد من حذف هذا الملف؟')) {
+    await dbDelete('annual_files', fileId);
+    renderFilesList();
+  }
+};
+
+// ==========================================
+// 3. إدارة أرشيف الفروض والاختبارات
+// ==========================================
+const examLevelSelect = document.getElementById('examLevelSelect');
+const customExamLevelInput = document.getElementById('customExamLevelInput');
+const examTypeSelect = document.getElementById('examTypeSelect');
+const customExamTypeInput = document.getElementById('customExamTypeInput');
+const examFileInput = document.getElementById('examFileInput');
+const examsFilesContainer = document.getElementById('examsFilesContainer');
+
+if (examLevelSelect) {
+  examLevelSelect.addEventListener('change', (e) => {
+    if (e.target.value === 'خيار آخر (أخرى)') {
+      customExamLevelInput.style.display = 'block';
+    } else {
+      customExamLevelInput.style.display = 'none';
+      customExamLevelInput.value = '';
+    }
+  });
+}
+
+if (examTypeSelect) {
+  examTypeSelect.addEventListener('change', (e) => {
+    if (e.target.value === 'خيار آخر (أخرى)') {
+      customExamTypeInput.style.display = 'block';
+    } else {
+      customExamTypeInput.style.display = 'none';
+      customExamTypeInput.value = '';
+    }
+  });
+}
+
+if (examFileInput) {
+  examFileInput.addEventListener('change', async function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    let level = examLevelSelect.value === 'خيار آخر (أخرى)' ? customExamLevelInput.value.trim() : examLevelSelect.value;
+    let examType = examTypeSelect.value === 'خيار آخر (أخرى)' ? customExamTypeInput.value.trim() : examTypeSelect.value;
+
+    if (!level || !examType) {
+      alert('الرجاء اختيار أو كتابة المستوى ونوع الفرض.');
+      examFileInput.value = '';
+      return;
+    }
+
+    const examItem = {
+      id: Date.now(),
+      level: level,
+      type: examType,
+      name: file.name,
+      size: (file.size / 1024).toFixed(1) + ' KB',
+      blob: file,
+      date: new Date().toLocaleDateString('ar-EG')
+    };
+    await dbSave('exams', examItem);
+    renderExamsList();
+    examFileInput.value = '';
+    alert(`تم رفع الملف (${file.name}) بنجاح.`);
+  });
+}
+
+async function renderExamsList() {
+  if (!examsFilesContainer) return;
+  const examsArchiveDatabase = await dbGetAll('exams');
+
+  if (examsArchiveDatabase.length === 0) {
+    examsFilesContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: #718096;">لا توجد فروض أو اختبارات مرفوعة بعد.</div>`;
+    return;
+  }
+  examsFilesContainer.innerHTML = examsArchiveDatabase.map((item, index) => `
+    <div style="display: flex; justify-content: space-between; align-items: center; background: #f8fafc; padding: 12px 15px; border-radius: 8px; border: 1px solid #e2e8f0; flex-wrap: wrap; gap: 10px;">
+      <div>
+        <span style="font-weight: bold; color: #1b4d3e;">${index + 1}. [${item.level}] - ${item.type}: ${item.name}</span> 
+        <span style="font-size: 0.8rem; color: #718096;">(${item.size} - ${item.date})</span>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="reset-btn" style="background-color: #2b6cb0; color: white; padding: 5px 12px; font-size: 0.85rem;" onclick="readExamItem(${item.id})">📖 معاينة</button>
+        <button class="reset-btn" style="background-color: #1b4d3e; color: white; padding: 5px 12px; font-size: 0.85rem;" onclick="downloadExamItem(${item.id})">📥 تحميل</button>
+        <button class="reset-btn" style="background-color: #fed7d7; color: #c53030; padding: 5px 12px; font-size: 0.85rem;" onclick="deleteExamItem(${item.id})">🗑️ حذف</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+window.readExamItem = async function(id) {
+  const item = await dbGet('exams', id);
+  if (!item) return;
+  const blob = item.blob || dataURLtoBlob(item.data);
+  if(!blob) { alert('خطأ في معاينة الملف.'); return; }
+  const url = URL.createObjectURL(blob);
+  window.open(url, '_blank');
+};
+
+window.downloadExamItem = async function(id) {
+  const item = await dbGet('exams', id);
+  if (!item) return;
+  const blob = item.blob || dataURLtoBlob(item.data);
+  if(!blob) { alert('خطأ في تنزيل الملف.'); return; }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = item.name;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+window.deleteExamItem = async function(id) {
+  if (confirm('هل أنت متأكد من حذف هذا الملف من الأرشيف؟')) {
+    await dbDelete('exams', id);
+    renderExamsList();
+  }
+};
+
+// ==========================================
+// 4. إدارة المذكرات البيداغوجية
+// ==========================================
+const memoLevelSelect = document.getElementById('memoLevelSelect');
+const customMemoLevelInput = document.getElementById('customMemoLevelInput');
+const memoTypeSelect = document.getElementById('memoTypeSelect');
+const customMemoTypeInput = document.getElementById('customMemoTypeInput');
+const memoFileInput = document.getElementById('memoFileInput');
+const memosFilesContainer = document.getElementById('memosFilesContainer');
+
+if (memoLevelSelect) {
+  memoLevelSelect.addEventListener('change', (e) => {
+    if (e.target.value === 'خيار آخر (أخرى)') {
+      customMemoLevelInput.style.display = 'block';
+    } else {
+      customMemoLevelInput.style.display = 'none';
+      customMemoLevelInput.value = '';
+    }
+  });
+}
+
+if (memoTypeSelect) {
+  memoTypeSelect.addEventListener('change', (e) => {
+    if (e.target.value === 'خيار آخر (أخرى)') {
+      customMemoTypeInput.style.display = 'block';
+    } else {
+      customMemoTypeInput.style.display = 'none';
+      customMemoTypeInput.value = '';
+    }
+  });
+}
+
+if (memoFileInput) {
+  memoFileInput.addEventListener('change', async function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    let level = memoLevelSelect.value === 'خيار آخر (أخرى)' ? customMemoLevelInput.value.trim() : memoLevelSelect.value;
+    let memoType = memoTypeSelect.value === 'خيار آخر (أخرى)' ? customMemoTypeInput.value.trim() : memoTypeSelect.value;
+
+    if (!level || !memoType) {
+      alert('الرجاء اختيار المستوى ونوع المذكرة.');
+      memoFileInput.value = '';
+      return;
+    }
+
+    const memoItem = {
+      id: Date.now(),
+      level: level,
+      type: memoType,
+      name: file.name,
+      size: (file.size / 1024).toFixed(1) + ' KB',
+      blob: file,
+      date: new Date().toLocaleDateString('ar-EG')
+    };
+
+    await dbSave('memos', memoItem);
+    renderMemosList();
+    memoFileInput.value = '';
+    alert(`تم رفع المذكرة (${file.name}) بنجاح.`);
+  });
+}
+
+async function renderMemosList() {
+  if (!memosFilesContainer) return;
+  const memosArchiveDatabase = await dbGetAll('memos');
+
+  if (memosArchiveDatabase.length === 0) {
+    memosFilesContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: #718096;">لا توجد مذكرات مرفوعة بعد.</div>`;
+    return;
+  }
+  memosFilesContainer.innerHTML = memosArchiveDatabase.map((item, index) => `
+    <div style="display: flex; justify-content: space-between; align-items: center; background: #f8fafc; padding: 12px 15px; border-radius: 8px; border: 1px solid #e2e8f0; flex-wrap: wrap; gap: 10px;">
+      <div>
+        <span style="font-weight: bold; color: #1b4d3e;">${index + 1}. [${item.level}] - ${item.type}: ${item.name}</span> 
+        <span style="font-size: 0.8rem; color: #718096;">(${item.size} - ${item.date})</span>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="reset-btn" style="background-color: #2b6cb0; color: white; padding: 5px 12px; font-size: 0.85rem;" onclick="readMemoItem(${item.id})">📖 معاينة</button>
+        <button class="reset-btn" style="background-color: #1b4d3e; color: white; padding: 5px 12px; font-size: 0.85rem;" onclick="downloadMemoItem(${item.id})">📥 تحميل</button>
+        <button class="reset-btn" style="background-color: #fed7d7; color: #c53030; padding: 5px 12px; font-size: 0.85rem;" onclick="deleteMemoItem(${item.id})">🗑️ حذف</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+window.readMemoItem = async function(id) {
+  const item = await dbGet('memos', id);
+  if (!item) return;
+  const blob = item.blob || dataURLtoBlob(item.data);
+  if (!blob) { alert('خطأ في معالجة المذكرة.'); return; }
+  const url = URL.createObjectURL(blob);
+  window.open(url, '_blank');
+};
+
+window.downloadMemoItem = async function(id) {
+  const item = await dbGet('memos', id);
+  if (!item) return;
+  const blob = item.blob || dataURLtoBlob(item.data);
+  if (!blob) { alert('خطأ في تحميل المذكرة.'); return; }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; 
+  a.download = item.name;
+  document.body.appendChild(a); 
+  a.click(); 
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+window.deleteMemoItem = async function(id) {
+  if (confirm('هل أنت متأكد من حذف هذه المذكرة؟')) {
+    await dbDelete('memos', id);
+    renderMemosList();
+  }
+};
+
+// ==========================================
+// 5. إدارة الوثائق الإدارية
+// ==========================================
+const docCategorySelect = document.getElementById('docCategorySelect');
+const adminDocFileInput = document.getElementById('adminDocFileInput');
+const adminDocsContainer = document.getElementById('adminDocsContainer');
+
+if (adminDocFileInput) {
+  adminDocFileInput.addEventListener('change', async function(e) {
+    const file = e.target.files[0];
+    const category = docCategorySelect.value;
+
+    if (!file || !category) {
+      alert('الرجاء اختيار نوع الوثيقة من القائمة المنسدلة أولاً.');
+      adminDocFileInput.value = '';
+      return;
+    }
+
+    const docItem = {
+      id: Date.now(),
+      category: category,
+      name: file.name,
+      size: (file.size / 1024).toFixed(1) + ' KB',
+      blob: file,
+      date: new Date().toLocaleDateString('ar-EG')
+    };
+
+    await dbSave('admin_docs', docItem);
+    renderAdminDocsList();
+    adminDocFileInput.value = '';
+    alert(`تمت إضافة الوثيقة (${category}: ${file.name}) بنجاح.`);
+  });
+}
+
+async function renderAdminDocsList() {
+  if (!adminDocsContainer) return;
+  const adminDocsDatabase = await dbGetAll('admin_docs');
+
+  if (adminDocsDatabase.length === 0) {
+    adminDocsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: #718096;">لم يتم إدراج أي وثيقة إدارية بعد.</div>`;
+    return;
+  }
+  adminDocsContainer.innerHTML = adminDocsDatabase.map((item, index) => `
+    <div style="display: flex; justify-content: space-between; align-items: center; background: #f8fafc; padding: 12px 15px; border-radius: 8px; border: 1px solid #e2e8f0; flex-wrap: wrap; gap: 10px;">
+      <div>
+        <span style="font-weight: bold; color: #1b4d3e;">${index + 1}. [${item.category}] - ${item.name}</span> 
+        <span style="font-size: 0.8rem; color: #718096;">(${item.size} - ${item.date})</span>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="reset-btn" style="background-color: #2b6cb0; color: white; padding: 5px 12px; font-size: 0.85rem;" onclick="readAdminDoc(${item.id})">📖 معاينة</button>
+        <button class="reset-btn" style="background-color: #1b4d3e; color: white; padding: 5px 12px; font-size: 0.85rem;" onclick="downloadAdminDoc(${item.id})">📥 تحميل</button>
+        <button class="reset-btn" style="background-color: #fed7d7; color: #c53030; padding: 5px 12px; font-size: 0.85rem;" onclick="deleteAdminDoc(${item.id})">🗑️ حذف</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+window.readAdminDoc = async function(id) {
+  const item = await dbGet('admin_docs', id);
+  if (!item) return;
+  const blob = item.blob || dataURLtoBlob(item.data);
+  if(!blob) { alert('خطأ في المعاينة.'); return; }
+  const url = URL.createObjectURL(blob);
+  window.open(url, '_blank');
+};
+
+window.downloadAdminDoc = async function(id) {
+  const item = await dbGet('admin_docs', id);
+  if (!item) return;
+  const blob = item.blob || dataURLtoBlob(item.data);
+  if(!blob) { alert('خطأ في التنزيل.'); return; }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = item.name;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+window.deleteAdminDoc = async function(id) {
+  if (confirm('هل أنت متأكد من حذف هذه الوثيقة من الفهرس؟')) {
+    await dbDelete('admin_docs', id);
+    renderAdminDocsList();
+  }
+};
+
+// ==========================================
+// 6. نظام متابعة التلاميذ والتقييم والغيابات الشاملة (محدث ومحسّن)
+// ==========================================
+const excelInput = document.getElementById('excelFile');
+const uploadSection = document.getElementById('uploadSection');
+const classesSelectionScreen = document.getElementById('classesSelectionScreen');
+const classTableScreen = document.getElementById('classTableScreen');
+const classesGrid = document.getElementById('classesGrid');
+const evaluationTable = document.getElementById('evaluationTable');
+const fileNameDisplay = document.getElementById('fileNameDisplay');
+const currentClassTitle = document.getElementById('currentClassTitle');
+const sessionCountBadge = document.getElementById('sessionCountBadge');
+const resetBtn = document.getElementById('resetBtn');
+const backToClassesBtn = document.getElementById('backToClassesBtn');
+const saveDataBtn = document.getElementById('saveDataBtn');
+
+const filterDateInput = document.getElementById('filterDateInput');
+const filterSessionNumSelect = document.getElementById('filterSessionNumSelect');
+const loadSessionBtn = document.getElementById('loadSessionBtn');
+const singleSessionContainer = document.getElementById('singleSessionContainer');
+const singleSessionTable = document.getElementById('singleSessionTable');
+const noSessionSelectedMsg = document.getElementById('noSessionSelectedMsg');
+const activeSessionTitle = document.getElementById('activeSessionTitle');
+
+let globalClassesData = [];
+let currentClassIndex = null;
+let currentActiveSessionIdx = null;
+
+if (filterDateInput) {
+  filterDateInput.value = new Date().toISOString().split('T')[0];
+}
+
+function letterToScore(letter, max) {
+  if (letter === 'A') return max;
+  if (letter === 'B') return max * 0.75;
+  if (letter === 'C') return max * 0.4;
+  if (letter === 'D') return 0;
+  if (letter === 'حاضر') return max;
+  if (letter === 'متأخر') return max * 0.7;
+  if (letter === 'غايب' || letter === 'غايب مبرر') return 0;
+  return max;
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  const savedData = localStorage.getItem('school_classes_data_v12');
+  if (savedData) {
+    try {
+      globalClassesData = JSON.parse(savedData);
+      if (globalClassesData.length > 0) {
+        if (uploadSection) uploadSection.style.display = 'none';
+        renderClassesCards();
+        if (classesSelectionScreen) classesSelectionScreen.style.display = 'block';
+      }
+    } catch(e) { console.error(e); }
+  }
+});
+
+if (saveDataBtn) {
+  saveDataBtn.addEventListener('click', () => {
+    if (currentClassIndex === null) return;
+    try {
+      localStorage.setItem('school_classes_data_v12', JSON.stringify(globalClassesData));
+    } catch(err) {
+      alert('خطأ في حفظ البيانات.');
+    }
+    const tabBtns = document.querySelectorAll('.tab-btn');
+    if (tabBtns.length > 1) {
+      tabBtns.forEach(b => b.classList.remove('active-tab'));
+      tabBtns[1].classList.add('active-tab');
+    }
+    const sessContent = document.getElementById('sessionsTabContent');
+    const evalContent = document.getElementById('evalTabContent');
+    if (sessContent) sessContent.style.display = 'none';
+    if (evalContent) evalContent.style.display = 'block';
+    renderEvaluationTable(globalClassesData[currentClassIndex]);
+    alert('تم حفظ التغييرات بنجاح وانتقلت للمراقبة الكلية.');
+  });
+}
+
+if (excelInput) {
+  excelInput.addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (fileNameDisplay) fileNameDisplay.textContent = `الملف: ${file.name}`;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const data = new Uint8Array(e.target.result);
+      const workbook = XLSX.read(data, { type: 'array' });
+      globalClassesData = [];
+      workbook.SheetNames.forEach(sheetName => {
+        const worksheet = workbook.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+        if (rows.length === 0) return;
+        let className = `الفوج: ${sheetName}`;
+        for (let r = 0; r < rows.length; r++) {
+          let rowStr = rows[r].join(' ');
+          if (rowStr.includes('الفوج التربوي')) { className = rowStr; break; }
+        }
+        let headerRowIdx = -1;
+        for (let r = 0; r < rows.length; r++) {
+          let rowVals = rows[r].map(v => String(v).toLowerCase().trim());
+          if (rowVals.includes('nom') || rowVals.includes('اللقب')) { headerRowIdx = r; break; }
+        }
+        if (headerRowIdx !== -1) {
+          let headers = rows[headerRowIdx];
+          let nomIdx = -1, prenomIdx = -1, dateIdx = -1;
+          headers.forEach((h, idx) => {
+            let hStr = String(h).toLowerCase().trim();
+            if (hStr === 'nom' || hStr === 'اللقب') nomIdx = idx;
+            if (hStr === 'prenom' || hStr === 'الاسم') prenomIdx = idx;
+            if (hStr === 'date_n' || hStr === 'تاريخ الميلاد') dateIdx = idx;
+          });
+          if (nomIdx !== -1 && prenomIdx !== -1) {
+            let startRow = headerRowIdx + 1;
+            let students = [];
+            for (let r = startRow; r < rows.length; r++) {
+              let row = rows[r];
+              if (row && row[nomIdx] !== undefined) {
+                let nomVal = String(row[nomIdx]).trim();
+                let prenomVal = row[prenomIdx] !== undefined ? String(row[prenomIdx]).trim() : '';
+
+                let checkNom = nomVal.toLowerCase();
+                let checkPrenom = prenomVal.toLowerCase();
+                if (checkNom === 'nom' || checkNom === 'اللقب' || checkPrenom === 'prenom' || checkPrenom === 'الاسم' || checkNom === 'nom et prenom') {
+                  continue; 
+                }
+
+                let date_n = row[dateIdx];
+                if (typeof date_n === 'number') date_n = excelDateToJSDate(date_n);
+                students.push({ 
+                  nom: nomVal, 
+                  prenom: prenomVal, 
+                  date_n: date_n || '', 
+                  sessions: [],
+                  testMark: 0, 
+                  examMark: 0,
+                  customAbsences: ''
+                });
+              }
+            }
+            if (students.length > 0) {
+              let cleanTitle = className;
+              if (cleanTitle.includes('الفوج التربوي :')) {
+                let p = cleanTitle.split('الفوج التربوي :');
+                if (p[1]) cleanTitle = p[1].split('مادة :')[0].trim();
+              }
+              globalClassesData.push({ cleanTitle, students, sessionsList: [] });
+            }
+          }
+        }
+      });
+      if (globalClassesData.length === 0) { alert('لم يتم العثور على بيانات تلاميذ مطابقة!'); return; }
+      renderClassesCards();
+      if (uploadSection) uploadSection.style.display = 'none';
+      if (classesSelectionScreen) classesSelectionScreen.style.display = 'block';
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function excelDateToJSDate(serial) {
+  const utc_days = Math.floor(serial - 25569);
+  return new Date(utc_days * 86400 * 1000).toISOString().split('T')[0];
+}
+
+function renderClassesCards() {
+  if (!classesGrid) return;
+  classesGrid.innerHTML = '';
+  globalClassesData.forEach((cls, index) => {
+    const card = document.createElement('div');
+    card.className = 'class-card-item';
+    card.innerHTML = `
+      <div class="class-card-title"><span>📚</span> ${cls.cleanTitle}</div>
+      <div style="display: flex; gap: 10px; align-items: center;">
+        <span class="badge">${cls.students.length} تلميذ</span>
+        <span class="badge" style="background-color: #2b6cb0; color: white;">الحصص: ${cls.sessionsList.length}</span>
+      </div>
+    `;
+    card.addEventListener('click', () => openClass(index));
+    classesGrid.appendChild(card);
+  });
+}
+
+function openClass(index) {
+  currentClassIndex = index;
+  const cls = globalClassesData[index];
+  if (currentClassTitle) currentClassTitle.textContent = `القسم: ${cls.cleanTitle}`;
+  if (sessionCountBadge) sessionCountBadge.textContent = `عدد الحصص المسجلة: ${cls.sessionsList.length}`;
+  if (singleSessionContainer) singleSessionContainer.style.display = 'none';
+  if (noSessionSelectedMsg) noSessionSelectedMsg.style.display = 'block';
+  if (classesSelectionScreen) classesSelectionScreen.style.display = 'none';
+  if (classTableScreen) classTableScreen.style.display = 'block';
+}
+
+// ==========================================
+// التنقل بين التبويبات (متابعة دورية | مراقبة مستمرة | متابعة الغيابات)
+// ==========================================
+function switchTab(tabName, evt) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active-tab'));
+  const sessContent = document.getElementById('sessionsTabContent');
+  const evalContent = document.getElementById('evalTabContent');
+  const absContent = document.getElementById('absencesTabContent');
+  
+  if (sessContent) sessContent.style.display = 'none';
+  if (evalContent) evalContent.style.display = 'none';
+  if (absContent) absContent.style.display = 'none';
+
+  const e = evt || (typeof event !== 'undefined' ? event : null);
+  if (e && e.target) e.target.classList.add('active-tab');
+
+  if (tabName === 'sessions') {
+    if (sessContent) sessContent.style.display = 'block';
+  } else if (tabName === 'eval') {
+    if (evalContent) evalContent.style.display = 'block';
+    renderEvaluationTable(globalClassesData[currentClassIndex]);
+  } else if (tabName === 'absences') {
+    if (absContent) absContent.style.display = 'block';
+    initAbsencesTab();
+  }
+}
+
+// ==========================================
+// فهرس ونظام الاستعلام الشامل عن الغيابات (محدث ومطوّر)
+// ==========================================
+function initAbsencesTab() {
+  const absContent = document.getElementById('absencesTabContent');
+  const cls = globalClassesData[currentClassIndex];
+  if (!absContent || !cls) return;
+
+  absContent.innerHTML = `
+    <div style="background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 20px; border: 1px solid #e2e8f0;">
+      <h3 style="margin-top: 0; color: #1b4d3e; font-size: 1.25rem;">🔍 فهرس واستعلام غيابات القسم: (${cls.cleanTitle})</h3>
+      
+      <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-top: 15px;">
+        <!-- البحث بحسب التلميذ -->
+        <div style="flex: 1; min-width: 280px; background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #cbd5e0;">
+          <label style="font-weight: bold; color: #2d3748; display: block; margin-bottom: 8px;">👤 استعلام بحسب التلميذ:</label>
+          <select id="studentAbsenceSelect" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e0;" onchange="showStudentAbsenceReport(this.value)">
+            <option value="">-- اختر التلميذ من القائمة --</option>
+            ${cls.students.map((st, i) => `<option value="${i}">${i + 1}. ${st.nom} ${st.prenom}</option>`).join('')}
+          </select>
+        </div>
+
+        <!-- البحث بحسب التاريخ -->
+        <div style="flex: 1; min-width: 280px; background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #cbd5e0;">
+          <label style="font-weight: bold; color: #2d3748; display: block; margin-bottom: 8px;">📅 استعلام بحسب التاريخ:</label>
+          <div style="display: flex; gap: 8px;">
+            <input type="date" id="dateAbsenceQueryInput" style="flex: 1; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e0;" value="${new Date().toISOString().split('T')[0]}">
+            <button onclick="showAbsencesByDateQuery()" class="reset-btn" style="background-color: #2b6cb0; color: white; padding: 8px 15px; font-weight: bold;">بحث</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- بطاقة عرض نتائج استعلام الغياب -->
+    <div id="studentAbsenceReportCard" style="display: none;"></div>
+  `;
+}
+
+// 1. عرض تقرير الغياب للتلميذ المختار
+window.showStudentAbsenceReport = function(studentIndex) {
+  const reportCard = document.getElementById('studentAbsenceReportCard');
+  if (studentIndex === "" || studentIndex === null || studentIndex === undefined) {
+    if (reportCard) reportCard.style.display = 'none';
+    return;
+  }
+
+  const cls = globalClassesData[currentClassIndex];
+  const st = cls.students[studentIndex];
+  if (!st) return;
+
+  let absentDates = [];
+  let excusedCount = 0;
+  let unexcusedCount = 0;
+  let totalSessions = cls.sessionsList.length;
+
+  if (st.sessions && st.sessions.length > 0) {
+    st.sessions.forEach((s, idx) => {
+      if (s.attendance === 'غايب' || s.attendance === 'غايب مبرر') {
+        let sDate = cls.sessionsList[idx] ? cls.sessionsList[idx].date : 'غير محدد';
+        let sNum = cls.sessionsList[idx] ? cls.sessionsList[idx].sessionNum : 'غير محدد';
+        let isExcused = s.attendance === 'غايب مبرر';
+        if (isExcused) excusedCount++; else unexcusedCount++;
+        absentDates.push({ date: sDate, num: sNum, type: s.attendance });
+      }
+    });
+  }
+
+  let totalAbsences = absentDates.length;
+
+  reportCard.style.display = 'block';
+  reportCard.innerHTML = `
+    <div style="background: #fff5f5; border: 1px solid #feb2b2; padding: 20px; border-radius: 8px;">
+      <h4 style="margin-top: 0; color: #c53030; font-size: 1.2rem; border-bottom: 2px solid #feb2b2; padding-bottom: 8px;">
+        👤 التلميذ(ة): ${st.nom} ${st.prenom} — (${cls.cleanTitle})
+      </h4>
+      
+      <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 15px;">
+        <div style="background: white; padding: 10px 15px; border-radius: 6px; border: 1px solid #cbd5e0; font-weight: bold;">
+          📊 مجموع الغيابات: <span style="color: #c53030; font-size: 1.2rem; margin: 0 5px;">${totalAbsences}</span> (غير مبرر: <span style="color: #e53e3e;">${unexcusedCount}</span> | مبرر: <span style="color: #38a169;">${excusedCount}</span>) من أصل ${totalSessions} حصة
+        </div>
+      </div>
+
+      <div style="margin-bottom: 15px;">
+        <strong style="color: #2d3748; display: block; margin-bottom: 8px;">📅 تواريخ غياب الحصص المسجلة تلقائياً:</strong>
+        ${absentDates.length > 0 ? `
+          <ul style="background: white; padding: 12px 25px; border-radius: 6px; border: 1px solid #edf2f7; margin: 0;">
+            ${absentDates.map(a => `<li style="margin-bottom: 6px; color: ${a.type === 'غايب مبرر' ? '#276749' : '#742a2a'};">التاريخ: <strong>${a.date}</strong> — (الحصة: ${a.num}) [<strong>${a.type}</strong>]</li>`).join('')}
+          </ul>
+        ` : `<p style="color: #38a169; font-weight: bold; background: white; padding: 10px; border-radius: 6px; margin: 0; border: 1px solid #c6f6d5;">✅ لم يتم تسجيل أي غياب للحصص المبرمجة لهذا التلميذ.</p>`}
+      </div>
+
+      <div>
+        <strong style="color: #2d3748; display: block; margin-bottom: 8px;">📝 غيابات وملاحظات إضافية (مدخلة يدوياً):</strong>
+        <div style="background: white; padding: 12px 15px; border-radius: 6px; border: 1px solid #edf2f7; font-weight: bold; color: #4a5568;">
+          ${st.customAbsences ? st.customAbsences : 'لا توجد ملاحظات أو تواريخ غياب يدوية مسجلة.'}
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+// 2. عرض التلاميذ الغائبين حسب التاريخ المنسدل/المدخل
+window.showAbsencesByDateQuery = function() {
+  const dateInput = document.getElementById('dateAbsenceQueryInput');
+  const reportCard = document.getElementById('studentAbsenceReportCard');
+  if (!dateInput || !reportCard) return;
+
+  const targetDate = dateInput.value;
+  if (!targetDate) {
+    alert('الرجاء اختيار أو كتابة تاريخ أولاً.');
+    return;
+  }
+
+  const cls = globalClassesData[currentClassIndex];
+  if (!cls) return;
+
+  let absentStudentsList = [];
+
+  cls.students.forEach((st, sIdx) => {
+    let matchedSessions = [];
+    if (st.sessions) {
+      st.sessions.forEach((s, sessIdx) => {
+        let sessionInfo = cls.sessionsList[sessIdx];
+        if (sessionInfo && sessionInfo.date === targetDate && (s.attendance === 'غايب' || s.attendance === 'غايب مبرر')) {
+          matchedSessions.push({ num: sessionInfo.sessionNum || 'حصة غير محددة', type: s.attendance });
+        }
+      });
+    }
+
+    let manualMatch = false;
+    if (st.customAbsences && st.customAbsences.includes(targetDate)) {
+      manualMatch = true;
+    }
+
+    if (matchedSessions.length > 0 || manualMatch) {
+      absentStudentsList.push({
+        num: sIdx + 1,
+        nom: st.nom,
+        prenom: st.prenom,
+        sessions: matchedSessions,
+        manual: manualMatch ? st.customAbsences : null
+      });
+    }
+  });
+
+  reportCard.style.display = 'block';
+  reportCard.innerHTML = `
+    <div style="background: #fff5f5; border: 1px solid #feb2b2; padding: 20px; border-radius: 8px;">
+      <h4 style="margin-top: 0; color: #c53030; font-size: 1.2rem; border-bottom: 2px solid #feb2b2; padding-bottom: 8px;">
+        📅 كشف غيابات تاريخ: ${targetDate} — قسم: (${cls.cleanTitle})
+      </h4>
+      <div style="margin-bottom: 12px; font-weight: bold; color: #2d3748;">
+        📊 عدد التلاميذ الغائبين في هذا اليوم: <span style="color: #c53030; font-size: 1.2rem;">${absentStudentsList.length}</span> تلميذ
+      </div>
+
+      ${absentStudentsList.length > 0 ? `
+        <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 6px; overflow: hidden; border: 1px solid #cbd5e0;">
+          <thead>
+            <tr style="background: #e53e3e; color: white;">
+              <th style="padding: 8px; border: 1px solid #feb2b2;">الرقم</th>
+              <th style="padding: 8px; border: 1px solid #feb2b2;">اللقب</th>
+              <th style="padding: 8px; border: 1px solid #feb2b2;">الاسم</th>
+              <th style="padding: 8px; border: 1px solid #feb2b2;">الحصة / تفاصيل الغياب</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${absentStudentsList.map(item => `
+              <tr>
+                <td style="padding: 8px; text-align: center; border: 1px solid #edf2f7;">${item.num}</td>
+                <td style="padding: 8px; font-weight: bold; border: 1px solid #edf2f7;">${item.nom}</td>
+                <td style="padding: 8px; font-weight: bold; border: 1px solid #edf2f7;">${item.prenom}</td>
+                <td style="padding: 8px; color: #c53030; border: 1px solid #edf2f7;">
+                  ${item.sessions.length > 0 ? item.sessions.map(ss => `غائب في: <strong>${ss.num}</strong> [${ss.type}]`).join('<br>') : ''}
+                  ${item.manual ? `<span style="display:block; font-size:0.85rem; color:#742a2a;">(ملاحظة يدوية: ${item.manual})</span>` : ''}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      ` : `<p style="color: #38a169; font-weight: bold; background: white; padding: 12px; border-radius: 6px; margin: 0; border: 1px solid #c6f6d5;">✅ لم يسجل أي غياب في هذا التاريخ (${targetDate}).</p>`}
+    </div>
+  `;
+};
+
+if (loadSessionBtn) {
+  loadSessionBtn.addEventListener('click', () => {
+    if (currentClassIndex === null || !globalClassesData[currentClassIndex]) {
+      alert('الرجاء اختيار القسم أولاً.');
+      return;
+    }
+
+    const cls = globalClassesData[currentClassIndex];
+    const selectedDate = filterDateInput.value;
+    const selectedNum = filterSessionNumSelect.value;
+
+    if (!selectedDate) {
+      alert('الرجاء تحديد تاريخ الحصة أولاً.');
+      return;
+    }
+
+    let sIdx = cls.sessionsList.findIndex(s => s.date === selectedDate && s.sessionNum === selectedNum);
+
+    if (sIdx === -1) {
+      cls.sessionsList.push({
+        date: selectedDate,
+        sessionNum: selectedNum,
+        title: `${selectedNum} (${selectedDate})`
+      });
+      sIdx = cls.sessionsList.length - 1;
+    }
+
+    cls.students.forEach(st => {
+      if (!st.sessions) st.sessions = [];
+      while (st.sessions.length <= sIdx) {
+        st.sessions.push({
+          attendance: 'حاضر', behavior: 'A', tools: 'A', notebook: 'A',
+          participation: 'A', indWork: 'A', grpWork: 'A', initiative: 'A'
+        });
+      }
+    });
+
+    currentActiveSessionIdx = sIdx;
+    if (sessionCountBadge) sessionCountBadge.textContent = `عدد الحصص المسجلة: ${cls.sessionsList.length}`;
+    renderSingleSessionTable(cls, sIdx);
+  });
+}
+
+function renderSingleSessionTable(cls, sIdx) {
+  const sessionInfo = cls.sessionsList[sIdx];
+  if (activeSessionTitle) activeSessionTitle.textContent = `📄 صفحة متابعة: ${sessionInfo.sessionNum} بتاريخ ${sessionInfo.date}`;
+  if (noSessionSelectedMsg) noSessionSelectedMsg.style.display = 'none';
+  if (singleSessionContainer) singleSessionContainer.style.display = 'block';
+  
+  if (singleSessionTable) {
+    singleSessionTable.innerHTML = `
+      <thead>
+        <tr><th>الرقم</th><th>اللقب</th><th>الاسم</th><th>الغياب</th><th>السلوك</th><th>الأدوات</th><th>الكراريس</th><th>المشاركة</th><th>عمل فردي</th><th>عمل فوج</th><th>المبادرة</th></tr>
+      </thead>
+      <tbody>
+        ${cls.students.map((st, i) => {
+          let sData = st.sessions[sIdx] || { attendance: 'حاضر', behavior: 'A', tools: 'A', notebook: 'A', participation: 'A', indWork: 'A', grpWork: 'A', initiative: 'A' };
+          return `
+            <tr>
+              <td>${i+1}</td><td>${st.nom}</td><td>${st.prenom}</td>
+              <td>
+                <select class="letter-select" style="width:110px;" onchange="updateSessionField(${i}, ${sIdx}, 'attendance', this.value)">
+                  <option value="حاضر" ${sData.attendance==='حاضر'?'selected':''}>حاضر</option>
+                  <option value="غايب" ${sData.attendance==='غايب'?'selected':''}>غايب (غير مبرر)</option>
+                  <option value="غايب مبرر" ${sData.attendance==='غايب مبرر'?'selected':''}>غايب (مبرر)</option>
+                  <option value="متأخر" ${sData.attendance==='متأخر'?'selected':''}>متأخر</option>
+                </select>
+              </td>
+              <td>${getSessionLetterSelect(sData.behavior, i, sIdx, 'behavior')}</td>
+              <td>${getSessionLetterSelect(sData.tools, i, sIdx, 'tools')}</td>
+              <td>${getSessionLetterSelect(sData.notebook, i, sIdx, 'notebook')}</td>
+              <td>${getSessionLetterSelect(sData.participation, i, sIdx, 'participation')}</td>
+              <td>${getSessionLetterSelect(sData.indWork, i, sIdx, 'indWork')}</td>
+              <td>${getSessionLetterSelect(sData.grpWork, i, sIdx, 'grpWork')}</td>
+              <td>${getSessionLetterSelect(sData.initiative, i, sIdx, 'initiative')}</td>
+            </tr>`;
+        }).join('')}
+      </tbody>
+    `;
+  }
+}
+
+function getSessionLetterSelect(val, i, sIdx, field) {
+  return `<select class="letter-select" style="width:70px;" onchange="updateSessionField(${i}, ${sIdx}, '${field}', this.value)"><option value="A" ${val==='A'?'selected':''}>A</option><option value="B" ${val==='B'?'selected':''}>B</option><option value="C" ${val==='C'?'selected':''}>C</option><option value="D" ${val==='D'?'selected':''}>D</option></select>`;
+}
+
+window.updateSessionField = function(studentIndex, sessionIndex, field, value) {
+  const cls = globalClassesData[currentClassIndex];
+  if (!cls || !cls.students[studentIndex]) return;
+
+  let st = cls.students[studentIndex];
+  if (!st.sessions) st.sessions = [];
+
+  if (!st.sessions[sessionIndex]) {
+    st.sessions[sessionIndex] = {
+      attendance: 'حاضر', behavior: 'A', tools: 'A', notebook: 'A',
+      participation: 'A', indWork: 'A', grpWork: 'A', initiative: 'A'
+    };
+  }
+
+  st.sessions[sessionIndex][field] = value;
+};
+
+function renderEvaluationTable(cls) {
+  if (!evaluationTable) return;
+  if (!cls || cls.students.length === 0) {
+    evaluationTable.innerHTML = `<tr><td style="text-align:center; padding:30px; color:#c53030;">⚠️ لا توجد بيانات للتلاميذ بعد.</td></tr>`;
+    return;
+  }
+
+  let count = cls.sessionsList.length;
+
+  let tableHeader = `
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+      <h3 style="margin: 0; color: #1b4d3e;">جدول المراقبة المستمرة وتقييم الفصل</h3>
+      <button onclick="exportEvaluationToExcel()" class="reset-btn" style="background-color: #276749; color: white; padding: 8px 16px;">📊 تصدير إلى ملف Excel</button>
+    </div>
+    <thead>
+      <tr>
+        <th rowspan="2">الرقم</th>
+        <th rowspan="2">اللقب</th>
+        <th rowspan="2">الاسم</th>
+        <th rowspan="2" style="background:#fff5f5; color:#c53030;">الغيابات (الحصص)</th>
+        <th rowspan="2" style="background:#fff0f0; color:#9b2c2c; min-width: 140px;">إدراج غياب / تواريخ إضافية</th>
+        <th>السلوك</th><th>الغياب</th><th>الأدوات</th><th>الكراريس</th><th>المشاركة</th><th>عمل فردي</th><th>عمل فوج</th><th>المبادرة</th>
+        <th rowspan="2" style="background:#ebf8ff; color:#2b6cb0;">المراقبة (/20)</th>
+        <th rowspan="2" style="background:#f0fff4; color:#276749;">الفرض (/20)</th>
+        <th rowspan="2" style="background:#faf5ff; color:#6b46c1;">الاختبار (/20)</th>
+      </tr>
+      <tr>
+        <th>(/3)</th><th>(/3)</th><th>(/3)</th><th>(/3)</th><th>(/3)</th><th>(/3)</th><th>(/1)</th><th>(/1)</th>
+      </tr>
+    </thead>
+  `;
+
+  let tableBody = cls.students.map((st, i) => {
+    let sumBeh=0, sumAtt=0, sumTools=0, sumNote=0, sumPart=0, sumInd=0, sumGrp=0, sumInit=0;
+    let absentDates = [];
+
+    if (st.sessions && st.sessions.length > 0) {
+      st.sessions.forEach((s, idx) => {
+        sumBeh += letterToScore(s.behavior, 3);
+        sumAtt += letterToScore(s.attendance, 3);
+        sumTools += letterToScore(s.tools, 3);
+        sumNote += letterToScore(s.notebook, 3);
+        sumPart += letterToScore(s.participation, 3);
+        sumInd += letterToScore(s.indWork, 3);
+        sumGrp += letterToScore(s.grpWork, 1);
+        sumInit += letterToScore(s.initiative, 1);
+
+        if (s.attendance === 'غايب' || s.attendance === 'غايب مبرر') {
+          let sDate = cls.sessionsList[idx] ? cls.sessionsList[idx].date : 'غير محدد';
+          absentDates.push(`${sDate} (${s.attendance})`);
+        }
+      });
+    }
+
+    let divisor = count > 0 ? count : 1;
+    let totalContinuous = (sumBeh+sumAtt+sumTools+sumNote+sumPart+sumInd+sumGrp+sumInit) / divisor;
+
+    let absentDisplay = absentDates.length > 0 
+      ? `<strong style="color:#c53030;">${absentDates.length} غيابات</strong> <br><span style="font-size:0.75rem; color:#718096;">(${absentDates.join('، ')})</span>`
+      : `<span style="color:#38a169;">لا يوجد</span>`;
+
+    return `
+      <tr>
+        <td>${i+1}</td>
+        <td>${st.nom}</td>
+        <td>${st.prenom}</td>
+        <td style="text-align:center; background:#fff5f5;">${absentDisplay}</td>
+        <td style="text-align:center; background:#fff0f0;">
+          <input type="text" value="${st.customAbsences || ''}" placeholder="أدخل التاريخ أو الملاحظة..." style="width:95%; text-align:center; padding:5px; border:1px solid #feb2b2; border-radius:4px; font-size:0.85rem;" onchange="updateStudentField(${i}, 'customAbsences', this.value)">
+        </td>
+        <td style="text-align:center;">${(sumBeh/divisor).toFixed(2)}</td>
+        <td style="text-align:center;">${(sumAtt/divisor).toFixed(2)}</td>
+        <td style="text-align:center;">${(sumTools/divisor).toFixed(2)}</td>
+        <td style="text-align:center;">${(sumNote/divisor).toFixed(2)}</td>
+        <td style="text-align:center;">${(sumPart/divisor).toFixed(2)}</td>
+        <td style="text-align:center;">${(sumInd/divisor).toFixed(2)}</td>
+        <td style="text-align:center;">${(sumGrp/divisor).toFixed(2)}</td>
+        <td style="text-align:center;">${(sumInit/divisor).toFixed(2)}</td>
+        <td class="total-score" style="text-align:center; background:#ebf8ff; font-weight:bold;">${totalContinuous.toFixed(2)}</td>
+        <td style="text-align:center; background:#f0fff4;">
+          <input type="number" min="0" max="20" step="0.25" value="${st.testMark || 0}" style="width:65px; text-align:center; padding:4px;" onchange="updateStudentField(${i}, 'testMark', parseFloat(this.value)||0)">
+        </td>
+        <td style="text-align:center; background:#faf5ff;">
+          <input type="number" min="0" max="20" step="0.25" value="${st.examMark || 0}" style="width:65px; text-align:center; padding:4px;" onchange="updateStudentField(${i}, 'examMark', parseFloat(this.value)||0)">
+        </td>
+      </tr>`;
+  }).join('');
+
+  evaluationTable.innerHTML = tableHeader + `<tbody>${tableBody}</tbody>`;
+}
+
+window.updateStudentField = function(studentIndex, field, value) {
+  const cls = globalClassesData[currentClassIndex];
+  if (!cls || !cls.students[studentIndex]) return;
+  cls.students[studentIndex][field] = value;
+};
+
+window.exportEvaluationToExcel = function() {
+  if (currentClassIndex === null || !globalClassesData[currentClassIndex]) return;
+  const cls = globalClassesData[currentClassIndex];
+
+  let dataForExcel = cls.students.map((st, i) => {
+    let count = cls.sessionsList.length || 1;
+    let sumBeh=0, sumAtt=0, sumTools=0, sumNote=0, sumPart=0, sumInd=0, sumGrp=0, sumInit=0;
+    let absentDates = [];
+
+    if (st.sessions) {
+      st.sessions.forEach((s, idx) => {
+        sumBeh += letterToScore(s.behavior, 3);
+        sumAtt += letterToScore(s.attendance, 3);
+        sumTools += letterToScore(s.tools, 3);
+        sumNote += letterToScore(s.notebook, 3);
+        sumPart += letterToScore(s.participation, 3);
+        sumInd += letterToScore(s.indWork, 3);
+        sumGrp += letterToScore(s.grpWork, 1);
+        sumInit += letterToScore(s.initiative, 1);
+        if (s.attendance === 'غايب' || s.attendance === 'غايب مبرر') {
+          let sDate = cls.sessionsList[idx] ? cls.sessionsList[idx].date : 'غير محدد';
+          absentDates.push(`${sDate} (${s.attendance})`);
+        }
+      });
+    }
+
+    let continuous = (sumBeh+sumAtt+sumTools+sumNote+sumPart+sumInd+sumGrp+sumInit) / count;
+
+    return {
+      "الرقم": i + 1,
+      "اللقب": st.nom,
+      "الاسم": st.prenom,
+      "عدد الغيابات الآلية": absentDates.length,
+      "تواريخ غياب الحصص": absentDates.join(' | ') || "لا يوجد",
+      "تواريخ / ملاحظات غياب إضافية": st.customAbsences || "لا يوجد",
+      "المراقبة المستمرة (/20)": continuous.toFixed(2),
+      "الفرض (/20)": st.testMark || 0,
+      "الاختبار (/20)": st.examMark || 0
+    };
+  });
+
+  const worksheet = XLSX.utils.json_to_sheet(dataForExcel);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "المراقبة والمعدلات");
+  XLSX.writeFile(workbook, `تقييم_مراقبة_${cls.cleanTitle}.xlsx`);
+};
+
+if (backToClassesBtn) backToClassesBtn.addEventListener('click', () => { classTableScreen.style.display = 'none'; classesSelectionScreen.style.display = 'block'; });
+if (resetBtn) resetBtn.addEventListener('click', resetToUpload);
+
+function resetToUpload() {
+  localStorage.removeItem('school_classes_data_v12');
+  if (excelInput) excelInput.value = '';
+  if (classesGrid) classesGrid.innerHTML = '';
+  globalClassesData = [];
+  if (classTableScreen) classTableScreen.style.display = 'none';
+  if (classesSelectionScreen) classesSelectionScreen.style.display = 'none';
+  if (uploadSection) uploadSection.style.display = 'block';
+}
+
+// ==========================================
+// 7. نظام الدفتر اليومي واستخراج المورد/المقطع
+// ==========================================
+const logLevelSelect = document.getElementById('logLevelSelect');
+const logClassSelect = document.getElementById('logClassSelect');
+const logDateInput = document.getElementById('logDateInput');
+const logHourSelect = document.getElementById('logHourSelect');
+const logSegmentSelect = document.getElementById('logSegmentSelect');
+const logResourceSelect = document.getElementById('logResourceSelect');
+const addNewSegmentBtn = document.getElementById('addNewSegmentBtn');
+const addNewResourceBtn = document.getElementById('addNewResourceBtn');
+const logLessonElements = document.getElementById('logLessonElements');
+const logNotesInput = document.getElementById('logNotesInput');
+const saveDailyLogBtn = document.getElementById('saveDailyLogBtn');
+const dailyLogsTableBody = document.getElementById('dailyLogsTableBody');
+const clearDailyLogsBtn = document.getElementById('clearDailyLogsBtn');
+const printDailyLogBtn = document.getElementById('printDailyLogBtn');
+
+if (logDateInput) {
+  logDateInput.value = new Date().toISOString().split('T')[0];
+}
+
+let dailyLogsDatabase = JSON.parse(localStorage.getItem('daily_logs_database_v1')) || [];
+
+function initDailyLogView() {
+  if (!logClassSelect) return;
+  logClassSelect.innerHTML = '<option value="">-- اختر القسم --</option>';
+  if (globalClassesData.length > 0) {
+    globalClassesData.forEach(cls => {
+      let opt = document.createElement('option');
+      opt.value = cls.cleanTitle;
+      opt.textContent = cls.cleanTitle;
+      logClassSelect.appendChild(opt);
+    });
+  } else {
+    let opt = document.createElement('option');
+    opt.value = "قسم عام";
+    opt.textContent = "قسم عام";
+    logClassSelect.appendChild(opt);
+  }
+  renderDailyLogsTable();
+}
+
+if (logLevelSelect) {
+  logLevelSelect.addEventListener('change', async (e) => {
+    const selectedLevel = e.target.value;
+    if (!logSegmentSelect || !logResourceSelect) return;
+    logSegmentSelect.innerHTML = '<option value="">-- اختر المقطع --</option>';
+    logResourceSelect.innerHTML = '<option value="">-- اختر المورد --</option>';
+
+    if (!selectedLevel) return;
+
+    const allFiles = await dbGetAll('annual_files');
+    const files = allFiles.filter(f => f.level === selectedLevel);
+
+    if (files.length === 0) {
+      alert(`⚠️ تنبيه: لا توجد ملفات توزيع مرفوعة للمستوى (${selectedLevel}).`);
+      return;
+    }
+
+    let segmentsSet = new Set();
+    let resourcesSet = new Set();
+
+    for (let file of files) {
+      const fileBlob = file.blob || dataURLtoBlob(file.data);
+      if (!fileBlob) continue;
+
+      try {
+        if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+          let buffer = await fileBlob.arrayBuffer();
+          let workbook = XLSX.read(buffer, { type: 'array' });
+          workbook.SheetNames.forEach(sheetName => {
+            let sheet = workbook.Sheets[sheetName];
+            let rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+            rows.forEach(row => {
+              row.forEach(cell => {
+                if (cell && typeof cell === 'string') {
+                  let val = cell.trim();
+                  if (val.length > 2) {
+                    if (val.includes('المقطع') || val.includes('مقطع') || val.includes('الوحدة') || val.includes('المجال')) {
+                      segmentsSet.add(val);
+                    } else if (val.length > 4 && !val.includes('السنة الدراسية') && !val.includes('الأستاذ')) {
+                      resourcesSet.add(val);
+                    }
+                  }
+                }
+              });
+            });
+          });
+        }
+      } catch(err) { console.error("خطأ قراءة الملف:", err); }
+    }
+
+    if (segmentsSet.size > 0) {
+      segmentsSet.forEach(seg => {
+        let opt = document.createElement('option');
+        opt.value = seg; opt.textContent = seg;
+        logSegmentSelect.appendChild(opt);
+      });
+    }
+
+    if (resourcesSet.size > 0) {
+      resourcesSet.forEach(res => {
+        let opt = document.createElement('option');
+        opt.value = res; opt.textContent = res;
+        logResourceSelect.appendChild(opt);
+      });
+    }
+  });
+}
+
+if (addNewSegmentBtn) {
+  addNewSegmentBtn.addEventListener('click', () => {
+    let newSeg = prompt('أدخل عنوان المقطع التعلمي الجديد:');
+    if (newSeg && newSeg.trim() !== '') {
+      let opt = document.createElement('option');
+      opt.value = newSeg.trim(); opt.textContent = newSeg.trim();
+      logSegmentSelect.appendChild(opt);
+      logSegmentSelect.value = newSeg.trim();
+    }
+  });
+}
+
+if (addNewResourceBtn) {
+  addNewResourceBtn.addEventListener('click', () => {
+    let newRes = prompt('أدخل عنوان المورد المستهدف الجديد:');
+    if (newRes && newRes.trim() !== '') {
+      let opt = document.createElement('option');
+      opt.value = newRes.trim(); opt.textContent = newRes.trim();
+      logResourceSelect.appendChild(opt);
+      logResourceSelect.value = newRes.trim();
+    }
+  });
+}
+
+if (saveDailyLogBtn) {
+  saveDailyLogBtn.addEventListener('click', () => {
+    const level = logLevelSelect.value;
+    const cls = logClassSelect.value;
+    const date = logDateInput.value;
+    const hour = logHourSelect.value;
+    const segment = logSegmentSelect.value;
+    const resource = logResourceSelect.value;
+    const lesson = logLessonElements.value.trim();
+    const notes = logNotesInput.value.trim();
+
+    if (!level || !cls || !date || !segment || !resource) {
+      alert('الرجاء اختيار المستوى، القسم، التاريخ، المقطع، والمورد.');
+      return;
+    }
+
+    dailyLogsDatabase.push({
+      id: Date.now(), level, class: cls, date, hour, segment, resource,
+      lesson: lesson || '---', notes: notes || '---'
+    });
+
+    localStorage.setItem('daily_logs_database_v1', JSON.stringify(dailyLogsDatabase));
+    renderDailyLogsTable();
+    logLessonElements.value = '';
+    logNotesInput.value = '';
+    alert('تم حفظ التسجيل في الدفتر اليومي بنجاح!');
+  });
+}
+
+function renderDailyLogsTable() {
+  if (!dailyLogsTableBody) return;
+  if (dailyLogsDatabase.length === 0) {
+    dailyLogsTableBody.innerHTML = `<tr><td colspan="10" style="text-align:center; padding: 30px; color: #718096;">لا توجد تسجيلات في الدفتر اليومي بعد.</td></tr>`;
+    return;
+  }
+  let sortedLogs = [...dailyLogsDatabase].sort((a, b) => {
+    if (a.date !== b.date) return a.date.localeCompare(b.date);
+    return a.hour.localeCompare(b.hour);
+  });
+  dailyLogsTableBody.innerHTML = sortedLogs.map((log, index) => `
+    <tr>
+      <td style="text-align:center;">${index + 1}</td>
+      <td style="text-align:center;">${log.date}</td>
+      <td style="text-align:center; font-weight:600;">${log.hour}</td>
+      <td style="text-align:center; color:#1b4d3e; font-weight:bold;">${log.class}</td>
+      <td style="text-align:center;">${log.level}</td>
+      <td>${log.segment}</td>
+      <td>${log.resource}</td>
+      <td>${log.lesson}</td>
+      <td>${log.notes}</td>
+      <td style="text-align:center;" class="no-print">
+        <button class="reset-btn" style="padding: 4px 10px; font-size: 0.8rem; color: #c53030; background:#fed7d7;" onclick="deleteDailyLogItem(${log.id})">🗑️ حذف</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+window.deleteDailyLogItem = function(id) {
+  if (confirm('هل أنت متأكد من حذف هذا السجل اليومي؟')) {
+    dailyLogsDatabase = dailyLogsDatabase.filter(l => l.id !== id);
+    localStorage.setItem('daily_logs_database_v1', JSON.stringify(dailyLogsDatabase));
+    renderDailyLogsTable();
+  }
+};
+
+if (clearDailyLogsBtn) {
+  clearDailyLogsBtn.addEventListener('click', () => {
+    if (confirm('هل أنت متأكد من مسح جميع سجلات الدفتر اليومي؟')) {
+      dailyLogsDatabase = [];
+      localStorage.removeItem('daily_logs_database_v1');
+      renderDailyLogsTable();
+    }
+  });
+}
+
+if (printDailyLogBtn) {
+  printDailyLogBtn.addEventListener('click', () => {
+    if (dailyLogsDatabase.length === 0) {
+      alert('لا توجد تسجيلات في الدفتر اليومي للطباعة.');
+      return;
+    }
+    let sortedLogs = [...dailyLogsDatabase].sort((a, b) => {
+      if (a.date !== b.date) return a.date.localeCompare(b.date);
+      return a.hour.localeCompare(b.hour);
+    });
+    let printWin = window.open('', '_blank');
+    printWin.document.write(`
+      <!DOCTYPE html>
+      <html lang="ar" dir="rtl">
+      <head>
+        <meta charset="UTF-8">
+        <title>الدفتر اليومي - المتابعة البيداغوجية</title>
+        <style>
+          @page { size: A4 landscape; margin: 10mm; }
+          body { font-family: 'Cairo', Tahoma, sans-serif; direction: rtl; color: #2d3748; margin: 0; padding: 0; font-size: 10pt; }
+          h2 { text-align: center; color: #1b4d3e; margin-bottom: 2px; font-size: 15pt; }
+          p.subtitle { text-align: center; color: #718096; margin-top: 0; margin-bottom: 12px; font-size: 9pt; }
+          table { width: 100%; border-collapse: collapse; margin-top: 5px; }
+          th, td { border: 1px solid #94a3b8; padding: 6px 8px; text-align: right; word-wrap: break-word; }
+          th { background-color: #1b4d3e; color: white; text-align: center; font-weight: bold; font-size: 9.5pt; }
+          tr:nth-child(even) { background-color: #f8fafc; }
+          .text-center { text-align: center; }
+          .footer-print { margin-top: 15px; display: flex; justify-content: space-between; font-size: 8.5pt; color: #4a5568; }
+        </style>
+      </head>
+      <body>
+        <h2>📖 الدفتر اليومي للمتابعة البيداغوجية</h2>
+        <p class="subtitle">مرتب تصاعدياً حسب التاريخ ثم الساعة</p>
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 4%;">الرقم</th>
+              <th style="width: 10%;">التاريخ</th>
+              <th style="width: 12%;">الساعة / الحصة</th>
+              <th style="width: 11%;">القسم</th>
+              <th style="width: 11%;">المستوى</th>
+              <th style="width: 15%;">المقطع التعلمي</th>
+              <th style="width: 15%;">المورد المستهدف</th>
+              <th style="width: 11%;">عناصر الدرس</th>
+              <th style="width: 11%;">ملاحظات</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sortedLogs.map((log, index) => `
+              <tr>
+                <td class="text-center">${index + 1}</td>
+                <td class="text-center">${log.date}</td>
+                <td class="text-center" style="font-weight: bold;">${log.hour}</td>
+                <td class="text-center" style="color: #1b4d3e; font-weight: bold;">${log.class}</td>
+                <td class="text-center">${log.level}</td>
+                <td>${log.segment}</td>
+                <td>${log.resource}</td>
+                <td>${log.lesson}</td>
+                <td>${log.notes}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+        <div class="footer-print">
+          <span>إمضاء الأستاذ: ........................</span>
+          <span>تاريخ الطبع: ${new Date().toLocaleDateString('ar-EG')}</span>
+          <span>إمضاء الإدارة: ........................</span>
+        </div>
+      </body>
+      </html>
+    `);
+    printWin.document.close();
+    printWin.onload = function() {
+      printWin.print();
+      printWin.close();
+    };
+  });
+}
